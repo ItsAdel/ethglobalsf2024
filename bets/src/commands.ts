@@ -163,8 +163,18 @@ export const commands: CommandGroup[] = [
   },
   {
     name: "Bet",
-    triggers: ["/bet", "@bet", "/agree", "@agree", "/disagree", "@disagree"],
-    description: "Bet on a prediction or respond to an active bet.",
+    triggers: [
+      "/bet",
+      "@bet",
+      "/agree",
+      "@agree",
+      "/disagree",
+      "@disagree",
+      "/finalize",
+      "@finalize",
+    ],
+    description:
+      "Bet on a prediction, respond to an active bet, or finalize a bet.",
     commands: [
       {
         command: "/bet [prompt] [amount]",
@@ -197,6 +207,17 @@ export const commands: CommandGroup[] = [
         handler: bet, // Same handler but handles disagree logic
         description:
           "Disagree on an active bet by providing the bet's unique ID.",
+        params: {
+          betId: {
+            type: "number",
+          },
+        },
+      },
+      {
+        command: "/finalize [betId]",
+        handler: bet, // Finalize handler for finalizing bets
+        description:
+          "Finalize a bet manually by providing the bet's unique ID.",
         params: {
           betId: {
             type: "number",

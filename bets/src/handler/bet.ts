@@ -85,6 +85,22 @@ export async function handler(context: HandlerContext) {
       await processResponse(context, disagreeBetId, "disagree");
       break;
 
+    case "finalize":
+      const finalizeBetId = params.betId;
+
+      if (!finalizeBetId) {
+        context.reply("Missing required parameters. Please provide betId.");
+        return;
+      }
+
+      if (!Bets.has(finalizeBetId)) {
+        context.reply("Bet not found.");
+        return;
+      }
+
+      await finalizeBet(context, finalizeBetId);
+      break;
+
     case "show":
       const betList = Array.from(Bets.entries())
         .filter(([_, bet]) => bet.status === "pending")
@@ -140,20 +156,6 @@ async function processResponse(
   context.send(
     `Someone has responded. There are now ${agreeCount} agrees and ${disagreeCount} disagrees for Bet #${betId}.`
   );
-
-  // Check if all users have responded, if so, finalize the bet
-  if (await allUsersResponded(betId, context)) {
-    await finalizeBet(context, betId);
-  }
-}
-
-// Check if all users in the group have responded to the current bet
-// TODO: FIX THIS
-async function allUsersResponded(betId: number, context: HandlerContext) {
-  const bet = Bets.get(betId);
-  const allUsers = context.members!;
-  console.log(allUsers);
-  return allUsers.every((user) => bet.responses.has(user));
 }
 
 // Finalize the bet and display the results
@@ -175,6 +177,6 @@ async function finalizeBet(context: HandlerContext, betId: number) {
   // Mark bet as resolved
   Bets.set(betId, {
     ...bet,
-    status: "resolved",
+    status: "placed",
   });
 }
