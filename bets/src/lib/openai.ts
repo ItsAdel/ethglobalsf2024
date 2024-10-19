@@ -9,7 +9,7 @@ const openai = new OpenAI({
 export async function textGeneration(
   userPrompt: string,
   systemPrompt: string,
-  chatHistory?: any[],
+  chatHistory?: any[]
 ) {
   let messages = chatHistory ? [...chatHistory] : []; // Start with existing chat history
   if (messages.length === 0) {

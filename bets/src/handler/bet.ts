@@ -1,10 +1,35 @@
-import { HandlerContext } from "@xmtp/message-kit";
+import { HandlerContext, User } from "@xmtp/message-kit";
+import OpenAI from "openai";
+import axios from "axios";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPEN_AI_API_KEY,
+});
+
+interface Bet {
+  prompt: string;
+  amount: number;
+  agreedUsers: string[];
+  disagreedUsers: string[];
+  responses: Map<string, string>;
+  status: string;
+  timestamps: {
+    createdAt: number;
+  };
+}
 
 const Bets = new Map();
 let activeBetCounter = 0;
+let systemPrompt;
+let reply;
 
 // Main handler function for processing commands
 export async function handler(context: HandlerContext) {
+  if (!process?.env?.OPEN_AI_API_KEY) {
+    console.log("No OPEN_AI_API_KEY found in .env");
+    return;
+  }
+
   const {
     message: {
       content: { command, params },
@@ -30,6 +55,38 @@ export async function handler(context: HandlerContext) {
 
       // Get current timestamp
       const currentTimestamp = Date.now();
+
+      systemPrompt = `
+      ### Context
+      Given the current timestamp ${currentTimestamp} and user promt to bet on a winning outcome sometime in the future, figure out when they are trying to place the bet and output it in the format e.g 2024-10-19.
+      The current year is 2024. All future dates will be creater than 2024 October 18
+      ### Output: 
+      Just the time in the format e.g. "2024-10-19"
+      `;
+
+      reply = (await textGeneration(prompt, systemPrompt)).reply;
+
+      console.log("Future time:", reply);
+
+      const sportsData = await fetchNBAGames(reply);
+      console.log("sportsData", sportsData);
+
+      systemPrompt = `
+      ### Context
+      You are a helpful bot agent that lives inside a web3 messaging group for making sports bets. You job is to help see if the provided prompt can be cross reference with an api response
+      to see if the existing sports bet exists and the bet can be scheduled. I will be pasting the data source and it needs to see if current user prompt can be used to place a bet.
+      Respond "yes" or "no".
+      `;
+
+      reply = (
+        await textGeneration(prompt, systemPrompt, JSON.stringify(sportsData))
+      ).reply;
+      console.log("yes/no", reply);
+
+      if (reply === "no") {
+        context.send(`Check your calendar grandpa, this game ain't real`);
+        return;
+      }
 
       // Increment bet counter for unique ID
       activeBetCounter++;
@@ -179,4 +236,130 @@ async function finalizeBet(context: HandlerContext, betId: number) {
     ...bet,
     status: "placed",
   });
+}
+
+async function textGeneration(
+  userPrompt: string,
+  systemPrompt: string,
+  data?: string
+) {
+  let messages = [];
+  messages.push({
+    role: "system",
+    content: systemPrompt,
+  });
+  messages.push({
+    role: "user",
+    content: userPrompt + `Data Source ${data}`,
+  });
+
+  try {
+    console.log("calling openAI");
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messages as any,
+    });
+    const reply = response.choices[0].message.content;
+    const cleanedReply = reply
+      ?.replace(/(\*\*|__)(.*?)\1/g, "$2")
+      ?.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$2")
+      ?.replace(/^#+\s*(.*)$/gm, "$1")
+      ?.replace(/`([^`]+)`/g, "$1")
+      ?.replace(/^`|`$/g, "");
+
+    return { reply: cleanedReply as string, history: messages };
+  } catch (error) {
+    console.error("Failed to fetch from OpenAI:", error);
+    throw error;
+  }
+}
+
+// ---------------
+
+interface Game {
+  id: number;
+  date: {
+    start: string;
+  };
+  teams: {
+    visitors: {
+      name: string;
+    };
+    home: {
+      name: string;
+    };
+  };
+  status: {
+    long: string;
+  };
+  scores?: {
+    visitors: {
+      points: number;
+    };
+    home: {
+      points: number;
+    };
+  };
+}
+
+interface GameSummary {
+  id: number;
+  date: string;
+  visitor_name: string;
+  home_name: string;
+  winner: string;
+}
+
+export async function fetchNBAGames(date: string): Promise<GameSummary[]> {
+  try {
+    const response = await axios.get(
+      "https://api-nba-v1.p.rapidapi.com/games",
+      {
+        params: { date },
+        headers: {
+          "x-rapidapi-key": process.env.RAPIDAPI_KEY || "",
+          "x-rapidapi-host": "api-nba-v1.p.rapidapi.com",
+        },
+      }
+    );
+
+    const games: Game[] = response.data.response;
+    return resolveGames(games);
+  } catch (error) {
+    console.error("Error fetching NBA games:", error);
+    throw new Error("Failed to fetch NBA games");
+  }
+}
+
+function resolveGames(games: Game[]): GameSummary[] {
+  const results: GameSummary[] = [];
+
+  games.forEach((game) => {
+    const visitors = game.teams.visitors;
+    const home = game.teams.home;
+
+    if (game.status.long === "Scheduled") {
+      results.push({
+        id: game.id,
+        date: game.date.start,
+        visitor_name: visitors.name,
+        home_name: home.name,
+        winner: "TBD",
+      });
+    } else if (game.status.long === "Finished") {
+      const visitorsPoints = game.scores?.visitors.points || 0;
+      const homePoints = game.scores?.home.points || 0;
+      const winner = visitorsPoints > homePoints ? visitors.name : home.name;
+
+      results.push({
+        id: game.id,
+        date: game.date.start,
+        visitor_name: visitors.name,
+        home_name: home.name,
+        winner: winner,
+      });
+    }
+  });
+
+  return results;
 }
