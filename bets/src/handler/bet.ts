@@ -66,6 +66,8 @@ export async function handler(context: HandlerContext) {
 
       reply = (await textGeneration(prompt, systemPrompt)).reply;
 
+      const betTimestamp = new Date(reply).getTime();
+
       console.log("Future time:", reply);
 
       const sportsData = await fetchNBAGames(reply);
@@ -74,8 +76,54 @@ export async function handler(context: HandlerContext) {
       systemPrompt = `
       ### Context
       You are a helpful bot agent that lives inside a web3 messaging group for making sports bets. You job is to help see if the provided prompt can be cross reference with an api response
-      to see if the existing sports bet exists and the bet can be scheduled. I will be pasting the data source and it needs to see if current user prompt can be used to place a bet.
-      Respond "yes" or "no".
+      to see if the existing sports bet is happening or happened and can be scheduled irrelevant of outcome. I will be pasting the data source and it needs to see if current user prompt can be used to place a bet.
+      Remember you are not reporting any outcomes just seeing if a game exists that the user is prompting.
+      Here is an example:
+      sportsData [
+      {
+        id: 14110,
+        date: '2024-10-19T00:00:00.000Z',
+        visitor_name: 'Cleveland Cavaliers',
+        home_name: 'Chicago Bulls',
+        winner: 'Chicago Bulls'
+      },
+      {
+        id: 14111,
+        date: '2024-10-19T00:00:00.000Z',
+        visitor_name: 'Miami Heat',
+        home_name: 'Memphis Grizzlies',
+        winner: 'Miami Heat'
+      },
+      {
+        id: 14113,
+        date: '2024-10-19T02:00:00.000Z',
+        visitor_name: 'Utah Jazz',
+        home_name: 'Portland Trail Blazers',
+        winner: 'Portland Trail Blazers'
+      },
+      {
+        id: 14114,
+        date: '2024-10-19T02:30:00.000Z',
+        visitor_name: 'Los Angeles Lakers',
+        home_name: 'Golden State Warriors',
+        winner: 'Golden State Warriors'
+      }
+      ]
+
+      The user prompt is: Warriors win game
+
+      You will check the data and see that Warriors is indeed playing a game. You will respond "yes"
+
+      If user prompt is: Warriors loses game
+    
+      You will check the data and see that Warriors is indeed playing a game. You will respond "yes"
+
+      If user prompt is: Raptors loses game
+
+      You will check the data and see that Raptors is not playing a game. You will respond "no"
+
+      ### Output
+      If the game is real, then Respond "yes" or "no".
       `;
 
       reply = (
@@ -102,6 +150,7 @@ export async function handler(context: HandlerContext) {
         status: "pending",
         timestamps: {
           createdAt: currentTimestamp,
+          betTimestamp: betTimestamp,
         },
       });
 
@@ -156,6 +205,22 @@ export async function handler(context: HandlerContext) {
       }
 
       await finalizeBet(context, finalizeBetId);
+      break;
+
+    case "resolve":
+      const resolveBetId = params.betId;
+
+      if (!resolveBetId) {
+        context.reply("Missing required parameters. Please provide betId.");
+        return;
+      }
+
+      if (!Bets.has(resolveBetId)) {
+        context.reply("Bet not found.");
+        return;
+      }
+
+      await resolveBet(context, resolveBetId);
       break;
 
     case "show":
@@ -236,6 +301,59 @@ async function finalizeBet(context: HandlerContext, betId: number) {
     ...bet,
     status: "placed",
   });
+}
+
+async function resolveBet(context: HandlerContext, betId: number) {
+  const bet = Bets.get(betId);
+
+  if (!bet) {
+    context.reply("Bet not found.");
+    return;
+  }
+
+  // Use betTimestamp for the game's date
+  const betDate = new Date(bet.timestamps.betTimestamp)
+    .toISOString()
+    .split("T")[0]; // Format the timestamp to YYYY-MM-DD
+
+  try {
+    // Fetch NBA data for the day the bet was placed
+    const games = await fetchNBAGames(betDate);
+    console.log("Fetched games for", betDate, games);
+
+    // Use OpenAI to determine if the bet was won or lost based on NBA data
+    const systemPrompt = `
+    ### Context
+    You are a helpful agent tasked with determining if a sports bet has been won or lost. I will provide you the bet prompt and the sports data for that day. 
+    Your job is to analyze the data and decide if the bet was successful or not.
+    Respond with "won" or "lost".
+    `;
+
+    const userPrompt = `The bet was: "${
+      bet.prompt
+    }". Here is the sports data: ${JSON.stringify(
+      games
+    )}. Did the user win or lose the bet?`;
+
+    const { reply } = await textGeneration(userPrompt, systemPrompt);
+    console.log("Outcome:", reply);
+
+    if (reply === "won" || reply === "lost") {
+      context.send(`Bet #${betId} has been resolved: The bet was ${reply}.`);
+
+      // Mark the bet as resolved and store the outcome
+      Bets.set(betId, {
+        ...bet,
+        status: "resolved",
+        outcome: reply, // Store the outcome ("won" or "lost")
+      });
+    } else {
+      context.send("Unable to determine the outcome of the bet.");
+    }
+  } catch (error) {
+    context.reply("Failed to resolve the bet.");
+    console.error("Error resolving bet:", error);
+  }
 }
 
 async function textGeneration(

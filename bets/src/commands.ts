@@ -172,6 +172,8 @@ export const commands: CommandGroup[] = [
       "@disagree",
       "/finalize",
       "@finalize",
+      "/resolve",
+      "@resolve",
     ],
     description:
       "Bet on a prediction, respond to an active bet, or finalize a bet.",
@@ -215,6 +217,17 @@ export const commands: CommandGroup[] = [
       },
       {
         command: "/finalize [betId]",
+        handler: bet, // Finalize handler for finalizing bets
+        description:
+          "Finalize a bet manually by providing the bet's unique ID.",
+        params: {
+          betId: {
+            type: "number",
+          },
+        },
+      },
+      {
+        command: "/resolve [betId]",
         handler: bet, // Finalize handler for finalizing bets
         description:
           "Finalize a bet manually by providing the bet's unique ID.",
