@@ -94,7 +94,7 @@ interface Bet {
 }
 
 const Bets = new Map();
-let activeBetCounter = 11;
+let activeBetCounter = 14;
 let systemPrompt;
 let reply;
 
