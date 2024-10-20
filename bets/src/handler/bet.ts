@@ -1,6 +1,81 @@
 import { HandlerContext, User } from "@xmtp/message-kit";
 import OpenAI from "openai";
 import axios from "axios";
+import { ethers } from "ethers";
+
+// Skale Network and Contracts Setup
+// const skaleRpcUrl = "https://testnet.skalenodes.com/v1/giant-half-dual-testnet";
+const privateKey = process.env.PRIVATE_KEY!;
+const usdcAddress = "0x9C9172a30D789CD78705eA51c99b31ADB6bDFf4e";
+const binaryBettingAddress = "0x46801AB04Ad479EC71308D187B4eA0231CF43F48";
+
+// Contract ABIs
+const usdcAbi = [
+  "function balanceOf(address account) view returns (uint256)",
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function mint() external",
+];
+
+const binaryBettingAbi = [
+  "function createGame(string memory _gameName, address[] memory _yesVoters, address[] memory _noVoters, uint _stake) returns (uint256)",
+  "function resolveAndDistribute(uint gameId, bool _yesWon)",
+  "function games(uint256) view returns (string memory gameName, uint256 totalStake, bool resolved, bool yesWon)",
+];
+
+// Initialize Contracts and Wallet
+let provider,
+  signer,
+  usdcContract: ethers.Contract,
+  binaryBettingContract: ethers.Contract;
+
+function instantiateConnection() {
+  provider = new ethers.JsonRpcProvider(process.env.SKALE_RPC_URL);
+  signer = new ethers.Wallet(privateKey, provider);
+  usdcContract = new ethers.Contract(usdcAddress, usdcAbi, signer);
+  binaryBettingContract = new ethers.Contract(
+    binaryBettingAddress,
+    binaryBettingAbi,
+    signer
+  );
+}
+
+async function approveUSDC(amount: bigint) {
+  const approveAmount = ethers.parseUnits(amount.toString(), 6); // Convert to USDC decimal format
+  const approveTx = await usdcContract.approve(
+    binaryBettingAddress,
+    approveAmount
+  );
+  await approveTx.wait();
+  console.log(`USDC approved for spending: ${amount} USDC`);
+}
+
+async function createGame(
+  gameName: string,
+  yesVoters: string[],
+  noVoters: string[],
+  stake: bigint
+) {
+  const stakeAmount = ethers.parseUnits(stake.toString(), 6); // Convert to USDC decimal format
+  console.log(yesVoters);
+  const createGameTx = await binaryBettingContract.createGame(
+    gameName,
+    yesVoters,
+    noVoters,
+    stakeAmount
+  );
+  const receipt = await createGameTx.wait();
+  console.log("Transaction receipt:", receipt);
+}
+
+async function resolveGame(gameId: number, yesWon: boolean) {
+  const resolveGameTx = await binaryBettingContract.resolveAndDistribute(
+    gameId,
+    yesWon
+  );
+  await resolveGameTx.wait();
+  console.log(`Bet ${gameId} resolved with outcome: ${yesWon ? "Yes" : "No"}`);
+}
 
 const openai = new OpenAI({
   apiKey: process.env.OPEN_AI_API_KEY,
@@ -19,7 +94,7 @@ interface Bet {
 }
 
 const Bets = new Map();
-let activeBetCounter = 0;
+let activeBetCounter = 11;
 let systemPrompt;
 let reply;
 
@@ -173,6 +248,7 @@ export async function handler(context: HandlerContext) {
       }
 
       await processResponse(context, agreeBetId, "agree");
+      context.reply(context.message.sender.address);
       break;
 
     case "disagree":
@@ -203,7 +279,6 @@ export async function handler(context: HandlerContext) {
         context.reply("Bet not found.");
         return;
       }
-
       await finalizeBet(context, finalizeBetId);
       break;
 
@@ -223,7 +298,7 @@ export async function handler(context: HandlerContext) {
       await resolveBet(context, resolveBetId);
       break;
 
-    case "show":
+    case "allBets":
       const betList = Array.from(Bets.entries())
         .filter(([_, bet]) => bet.status === "pending")
         .map(([id, bet]) => `Bet #${id}: ${bet.prompt} (${bet.amount})`)
@@ -251,7 +326,7 @@ async function processResponse(
   response: string
 ) {
   const bet = Bets.get(betId);
-  const senderAddress = context.message.sender.address;
+  const senderAddress = ethers.getAddress(context.message.sender.address);
 
   // Remove the sender from the opposite response list if they had previously responded
   if (response === "agree") {
@@ -282,18 +357,35 @@ async function processResponse(
 
 // Finalize the bet and display the results
 async function finalizeBet(context: HandlerContext, betId: number) {
+  instantiateConnection();
+
   const bet = Bets.get(betId);
+  if (!bet) return;
+
+  const gameName = bet.prompt;
+  const yesVoters = bet.agreedUsers;
+  const noVoters = bet.disagreedUsers;
+  const amount = ethers.parseUnits(bet.amount.toString(), 6);
+
   const agreeCount = bet.agreedUsers.length;
   const disagreeCount = bet.disagreedUsers.length;
 
-  if (agreeCount > disagreeCount) {
-    context.send(
-      `Bet #${betId} finalized: Majority agreed to "${bet.prompt}" for ${bet.amount}.`
-    );
-  } else {
-    context.send(
-      `Bet #${betId} finalized: Majority disagreed with "${bet.prompt}".`
-    );
+  try {
+    // Approve USDC for contract spending
+    await approveUSDC(amount);
+
+    // Create the game in the smart contract
+    await createGame(gameName, yesVoters, noVoters, amount);
+
+    context.send(`Bet #${betId} successfully created.`);
+    if (agreeCount > disagreeCount) {
+      context.send(`Majority agreed to "${bet.prompt}" for ${bet.amount}.`);
+    } else {
+      context.send(`Majority disagreed with "${bet.prompt}".`);
+    }
+  } catch (error) {
+    console.error("Error creating bet on-chain:", error);
+    context.send("Failed to create bet on-chain.");
   }
 
   // Mark bet as resolved
@@ -337,6 +429,9 @@ async function resolveBet(context: HandlerContext, betId: number) {
 
     const { reply } = await textGeneration(userPrompt, systemPrompt);
     console.log("Outcome:", reply);
+
+    const yesWon = reply === "won";
+    await resolveGame(betId, yesWon);
 
     if (reply === "won" || reply === "lost") {
       context.send(`Bet #${betId} has been resolved: The bet was ${reply}.`);
